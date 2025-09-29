@@ -19,3 +19,28 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+# Retrofit
+-keepattributes Signature
+-keepattributes Exceptions
+-keepattributes *Annotation*
+
+-keep class retrofit2.** { *; }
+-keepclasseswithmembers class * {
+    @retrofit2.http.* <methods>;
+}
+
+# Gson
+-keep class com.google.gson.** { *; }
+-keepattributes Signature
+-keepattributes *Annotation*
+
+# Keep your model classes (replace with your actual package name)
+-keep class com.example.eventsponsorassistant.data.** { *; }
+-keep class com.example.eventsponsorassistant.model.** { *; }
+-keep class com.example.eventsponsorassistant.network.** { *; }
+
+# OkHttp (Retrofit's dependency)
+-dontwarn okhttp3.**
+-dontwarn okio.**
+-keep class okhttp3.** { *; }
+-keep interface okhttp3.** { *; }

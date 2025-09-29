@@ -46,7 +46,6 @@ import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.Body
 import retrofit2.http.POST
-import retrofit2.http.Path
 import java.util.UUID
 
 // --- Data classes for API communication (matching JSON structure) ---
@@ -62,36 +61,19 @@ data class ApiRequest(
 
 data class ApiContent(val parts: List<MessagePart>)
 data class ApiEvent(val content: ApiContent)
-// The API returns a list of events
 typealias ApiResponse = List<ApiEvent>
-
-// NEW: Data class for creating a session
-data class SessionCreationRequest(val state: Map<String, Any> = emptyMap())
 
 
 // --- Retrofit setup for networking ---
 
 interface ApiService {
     @POST("run")
-    // MODIFIED: Returns the full Response object to check status codes
     suspend fun sendMessage(@Body request: ApiRequest): Response<ApiResponse>
-
-    // NEW: Endpoint to create a session
-    @POST("apps/{appName}/users/{userId}/sessions/{sessionId}")
-    suspend fun createSession(
-        @Path("appName") appName: String,
-        @Path("userId") userId: String,
-        @Path("sessionId") sessionId: String,
-        @Body body: SessionCreationRequest
-    ): Response<Unit> // We don't need a body back from this request
 }
 
 
 object RetrofitClient {
-    // --- IMPORTANT: PASTE YOUR BASE URL HERE ---
-    // This should be the main URL of your Cloud Run service, ending with a "/"
-    // For example: "https://your-service-name-uc.a.run.app/"
-    private const val BASE_URL = ""
+    private const val BASE_URL = "https://adk-backend-service-766291037876.us-central1.run.app/"
 
     val instance: ApiService by lazy {
         val retrofit = Retrofit.Builder()
@@ -138,7 +120,15 @@ class ChatViewModel : ViewModel() {
         isDarkTheme = !isDarkTheme
     }
 
-    // --- MODIFIED: sendMessage now includes session creation logic ---
+    // NEW: Function to refresh the chat
+    fun refreshChat() {
+        _messages.clear()
+        showWelcomeScreen = true
+        textInput = ""
+        isLoading = false
+    }
+
+    // --- SIMPLIFIED: sendMessage now only calls the /run endpoint ---
     fun sendMessage(fromSuggestion: Boolean = false) {
         val messageText = textInput.trim()
         if (messageText.isEmpty() || isLoading) return
@@ -160,32 +150,14 @@ class ChatViewModel : ViewModel() {
                     new_message = NewMessage(parts = listOf(MessagePart(text = messageText)))
                 )
 
-                // First attempt to send the message
-                val initialResponse = RetrofitClient.instance.sendMessage(request)
+                // The backend proxy handles session creation, so we only need to call /run
+                val response = RetrofitClient.instance.sendMessage(request)
 
-                if (initialResponse.isSuccessful) {
-                    handleSuccessfulResponse(initialResponse.body())
-                }
-                // If the session doesn't exist (404), create it and retry
-                else if (initialResponse.code() == 404) {
-                    println("Session not found (404). Creating a new one...")
-                    val sessionCreated = createNewSession(request)
-
-                    if (sessionCreated) {
-                        println("Session created. Retrying message send...")
-                        // Retry sending the message
-                        val retryResponse = RetrofitClient.instance.sendMessage(request)
-                        if (retryResponse.isSuccessful) {
-                            handleSuccessfulResponse(retryResponse.body())
-                        } else {
-                            handleApiError("Failed to send message on retry. Error: ${retryResponse.code()}")
-                        }
-                    } else {
-                        handleApiError("Failed to create a new session.")
-                    }
+                if (response.isSuccessful) {
+                    handleSuccessfulResponse(response.body())
                 } else {
-                    // Handle other HTTP errors
-                    handleApiError("API Error: ${initialResponse.code()} - ${initialResponse.message()}")
+                    // This handles non-404 errors like 500, 403, etc.
+                    handleApiError("API Error: ${response.code()} - ${response.message()}")
                 }
 
             } catch (e: Exception) {
@@ -195,21 +167,6 @@ class ChatViewModel : ViewModel() {
             } finally {
                 isLoading = false
             }
-        }
-    }
-
-    private suspend fun createNewSession(request: ApiRequest): Boolean {
-        return try {
-            val response = RetrofitClient.instance.createSession(
-                appName = request.app_name,
-                userId = request.user_id,
-                sessionId = request.session_id,
-                body = SessionCreationRequest()
-            )
-            response.isSuccessful
-        } catch (e: Exception) {
-            e.printStackTrace()
-            false
         }
     }
 
@@ -225,7 +182,6 @@ class ChatViewModel : ViewModel() {
     private fun handleApiError(errorMessage: String) {
         _messages.add(ChatMessage(text = errorMessage, author = Author.ASSISTANT))
     }
-
 
     fun sendSuggestion(suggestionText: String) {
         onTextInputChanged(suggestionText)
@@ -280,7 +236,11 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun EventSponsorApp(viewModel: ChatViewModel) {
     Scaffold(
-        topBar = { AppHeader(isDarkTheme = viewModel.isDarkTheme, onThemeToggle = { viewModel.toggleTheme() }) },
+        topBar = { AppHeader(
+            isDarkTheme = viewModel.isDarkTheme,
+            onThemeToggle = { viewModel.toggleTheme() },
+            onLogoClick = { viewModel.refreshChat() } // Pass refresh action
+        ) },
         bottomBar = { MessageInputArea(
             value = viewModel.textInput,
             onValueChange = { viewModel.onTextInputChanged(it) },
@@ -311,7 +271,7 @@ fun EventSponsorApp(viewModel: ChatViewModel) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AppHeader(isDarkTheme: Boolean, onThemeToggle: () -> Unit) {
+fun AppHeader(isDarkTheme: Boolean, onThemeToggle: () -> Unit, onLogoClick: () -> Unit) {
     TopAppBar(
         title = {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -319,7 +279,8 @@ fun AppHeader(isDarkTheme: Boolean, onThemeToggle: () -> Unit) {
                     modifier = Modifier
                         .size(32.dp)
                         .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary),
+                        .background(MaterialTheme.colorScheme.primary)
+                        .clickable(onClick = onLogoClick), // Make logo clickable
                     contentAlignment = Alignment.Center
                 ) {
                     Text("ES", color = MaterialTheme.colorScheme.background, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
@@ -394,12 +355,19 @@ fun SuggestionGrid(onSuggestionClick: (String) -> Unit) {
 
     LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         items(suggestions.chunked(2)) { rowItems ->
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            // UI FIX: Added IntrinsicSize.Min to make cards in a row the same height
+            Row(
+                modifier = Modifier.height(IntrinsicSize.Min),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
                 rowItems.forEach { (title, prompt) ->
-                    SuggestionCard(title = title, description = prompt, onClick = { onSuggestionClick(prompt) }, modifier = Modifier.weight(1f))
-                }
-                if(rowItems.size < 2) {
-                    Spacer(modifier = Modifier.weight(1f))
+                    SuggestionCard(
+                        title = title,
+                        description = prompt,
+                        onClick = { onSuggestionClick(prompt) },
+                        // UI FIX: Added fillMaxHeight to make card expand to row height
+                        modifier = Modifier.weight(1f).fillMaxHeight()
+                    )
                 }
             }
         }
