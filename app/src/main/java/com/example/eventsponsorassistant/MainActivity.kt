@@ -574,24 +574,39 @@ fun MessageInputArea(value: String, onValueChange: (String) -> Unit, onSendClick
     ) {
         Row(
             modifier = Modifier
-                .padding(horizontal = 16.dp, vertical = 12.dp)
+                .padding(horizontal = 16.dp, vertical = 16.dp)
+                .padding(bottom = 8.dp)
                 .border(1.dp, MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(24.dp))
                 .padding(horizontal = 8.dp),
-            verticalAlignment = Alignment.Bottom
+            verticalAlignment = Alignment.CenterVertically
         ) {
             BasicTextField(
                 value = value,
                 onValueChange = onValueChange,
                 modifier = Modifier
                     .weight(1f)
-                    .padding(horizontal = 12.dp, vertical = 12.dp),
-                textStyle = TextStyle(color = MaterialTheme.colorScheme.onSurface, fontSize = 16.sp),
+                    .heightIn(min = 56.dp)
+                    .padding(horizontal = 12.dp, vertical = 16.dp)
+                    .wrapContentHeight(Alignment.CenterVertically),
+                textStyle = TextStyle(
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontSize = 16.sp
+                ),
                 cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                 decorationBox = { innerTextField ->
-                    if (value.isEmpty()) {
-                        Text("Ask me about event sponsorship...", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                    Box(
+                        modifier = Modifier.fillMaxWidth(),
+                        contentAlignment = Alignment.CenterStart
+                    ) {
+                        if (value.isEmpty()) {
+                            Text(
+                                "Ask me about event sponsorship...",
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                                fontWeight = FontWeight.Normal
+                            )
+                        }
+                        innerTextField()
                     }
-                    innerTextField()
                 }
             )
 
