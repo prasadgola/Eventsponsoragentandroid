@@ -46,6 +46,8 @@ import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.Body
 import retrofit2.http.POST
+import retrofit2.http.PUT
+import retrofit2.http.Path
 import java.util.UUID
 
 // --- Data classes for API communication (matching JSON structure) ---
@@ -63,12 +65,22 @@ data class ApiContent(val parts: List<MessagePart>)
 data class ApiEvent(val content: ApiContent)
 typealias ApiResponse = List<ApiEvent>
 
+// Session creation request
+data class SessionState(val state: Map<String, Any> = emptyMap())
 
 // --- Retrofit setup for networking ---
 
 interface ApiService {
     @POST("run")
     suspend fun sendMessage(@Body request: ApiRequest): Response<ApiResponse>
+
+    @POST("apps/{app_name}/users/{user_id}/sessions/{session_id}")
+    suspend fun createSession(
+        @Path("app_name") appName: String,
+        @Path("user_id") userId: String,
+        @Path("session_id") sessionId: String,
+        @Body sessionState: SessionState
+    ): Response<Any>
 }
 
 
@@ -128,7 +140,7 @@ class ChatViewModel : ViewModel() {
         isLoading = false
     }
 
-    // --- SIMPLIFIED: sendMessage now only calls the /run endpoint ---
+    // --- UPDATED: sendMessage with session creation logic ---
     fun sendMessage(fromSuggestion: Boolean = false) {
         val messageText = textInput.trim()
         if (messageText.isEmpty() || isLoading) return
@@ -150,23 +162,81 @@ class ChatViewModel : ViewModel() {
                     new_message = NewMessage(parts = listOf(MessagePart(text = messageText)))
                 )
 
-                // The backend proxy handles session creation, so we only need to call /run
+                // Try to run the agent
                 val response = RetrofitClient.instance.sendMessage(request)
 
                 if (response.isSuccessful) {
                     handleSuccessfulResponse(response.body())
+                } else if (response.code() == 404) {
+                    // Session not found - create it and retry
+                    println("🤔 Session not found (404). Creating a new session...")
+
+                    val sessionCreated = createSession(
+                        request.app_name,
+                        request.user_id,
+                        request.session_id
+                    )
+
+                    if (sessionCreated) {
+                        println("🔄 Retrying to run the agent...")
+                        // Retry the original request
+                        val retryResponse = RetrofitClient.instance.sendMessage(request)
+
+                        if (retryResponse.isSuccessful) {
+                            handleSuccessfulResponse(retryResponse.body())
+                        } else {
+                            handleApiError("API Error after retry: ${retryResponse.code()} - ${retryResponse.message()}")
+                        }
+                    } else {
+                        handleApiError("Failed to create session. Please try again.")
+                    }
                 } else {
-                    // This handles non-404 errors like 500, 403, etc.
+                    // Other errors
                     handleApiError("API Error: ${response.code()} - ${response.message()}")
                 }
 
             } catch (e: Exception) {
-                // Handle network-level errors (no internet, DNS issues, etc.)
+                // Handle network-level errors
                 e.printStackTrace()
-                handleApiError("Network Error: Could not connect to the server. Please check your connection and the URL.")
+                handleApiError("Network Error: Could not connect to the server. Please check your connection.")
             } finally {
                 isLoading = false
             }
+        }
+    }
+
+    // --- NEW: Create session function ---
+    private suspend fun createSession(appName: String, userId: String, sessionId: String): Boolean {
+        return try {
+            println("🔧 Attempting to create session...")
+            println("   App Name: $appName")
+            println("   User ID: $userId")
+            println("   Session ID: $sessionId")
+
+            val sessionState = SessionState(state = emptyMap())
+            val response = RetrofitClient.instance.createSession(
+                appName = appName,
+                userId = userId,
+                sessionId = sessionId,
+                sessionState = sessionState
+            )
+
+            println("📡 Session creation response code: ${response.code()}")
+
+            if (response.isSuccessful) {
+                println("✅ Session created successfully")
+                true
+            } else {
+                val errorBody = response.errorBody()?.string()
+                println("❌ Failed to create session: ${response.code()} - ${response.message()}")
+                println("❌ Error body: $errorBody")
+                false
+            }
+        } catch (e: Exception) {
+            println("❌ Exception while creating session: ${e.message}")
+            println("❌ Exception type: ${e.javaClass.simpleName}")
+            e.printStackTrace()
+            false
         }
     }
 
@@ -196,8 +266,8 @@ private val DarkColorScheme = darkColorScheme(
     surface = Color(0xFF303134),
     onBackground = Color(0xFFE8EAED),
     onSurface = Color(0xFFE8EAED),
-    surfaceVariant = Color(0xFF3C4043), // For borders and dividers
-    secondaryContainer = Color(0xFF2D2D30), // User message bubble
+    surfaceVariant = Color(0xFF3C4043),
+    secondaryContainer = Color(0xFF2D2D30),
 )
 
 private val LightColorScheme = lightColorScheme(
@@ -206,8 +276,8 @@ private val LightColorScheme = lightColorScheme(
     surface = Color(0xFFF8F9FA),
     onBackground = Color(0xFF202124),
     onSurface = Color(0xFF202124),
-    surfaceVariant = Color(0xFFDADCE0), // For borders and dividers
-    secondaryContainer = Color(0xFFF1F3F4), // User message bubble
+    surfaceVariant = Color(0xFFDADCE0),
+    secondaryContainer = Color(0xFFF1F3F4),
 )
 
 // --- Main Activity ---
@@ -239,7 +309,7 @@ fun EventSponsorApp(viewModel: ChatViewModel) {
         topBar = { AppHeader(
             isDarkTheme = viewModel.isDarkTheme,
             onThemeToggle = { viewModel.toggleTheme() },
-            onLogoClick = { viewModel.refreshChat() } // Pass refresh action
+            onLogoClick = { viewModel.refreshChat() }
         ) },
         bottomBar = { MessageInputArea(
             value = viewModel.textInput,
@@ -280,7 +350,7 @@ fun AppHeader(isDarkTheme: Boolean, onThemeToggle: () -> Unit, onLogoClick: () -
                         .size(32.dp)
                         .clip(CircleShape)
                         .background(MaterialTheme.colorScheme.primary)
-                        .clickable(onClick = onLogoClick), // Make logo clickable
+                        .clickable(onClick = onLogoClick),
                     contentAlignment = Alignment.Center
                 ) {
                     Text("ES", color = MaterialTheme.colorScheme.background, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
@@ -355,7 +425,6 @@ fun SuggestionGrid(onSuggestionClick: (String) -> Unit) {
 
     LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         items(suggestions.chunked(2)) { rowItems ->
-            // UI FIX: Added IntrinsicSize.Min to make cards in a row the same height
             Row(
                 modifier = Modifier.height(IntrinsicSize.Min),
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -365,7 +434,6 @@ fun SuggestionGrid(onSuggestionClick: (String) -> Unit) {
                         title = title,
                         description = prompt,
                         onClick = { onSuggestionClick(prompt) },
-                        // UI FIX: Added fillMaxHeight to make card expand to row height
                         modifier = Modifier.weight(1f).fillMaxHeight()
                     )
                 }
@@ -548,7 +616,6 @@ fun MessageInputArea(value: String, onValueChange: (String) -> Unit, onSendClick
     }
 }
 
-// Helper for Preview
 private val ColorScheme.isLight get() = this.background == LightColorScheme.background
 
 @Preview(showBackground = true, name = "Light Mode Preview")
@@ -572,4 +639,3 @@ fun DarkPreview() {
         }
     }
 }
-
