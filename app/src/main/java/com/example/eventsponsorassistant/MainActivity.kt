@@ -241,12 +241,24 @@ class ChatViewModel : ViewModel() {
     }
 
     private fun handleSuccessfulResponse(responseBody: ApiResponse?) {
-        val assistantMessage = responseBody?.firstOrNull()?.content?.parts?.firstOrNull()?.text
-        if (assistantMessage != null) {
-            _messages.add(ChatMessage(text = assistantMessage, author = Author.ASSISTANT))
-        } else {
-            _messages.add(ChatMessage(text = "Sorry, I received an empty response from the server.", author = Author.ASSISTANT))
+        val textParts = mutableListOf<String>()
+
+        responseBody?.forEach { event ->
+            event.content.parts.forEach { part ->
+                if (!part.text.isNullOrEmpty()) {
+                    textParts.add(part.text)
+                }
+            }
         }
+
+        // Join all text parts or show error if none found
+        val assistantMessage = if (textParts.isNotEmpty()) {
+            textParts.joinToString("\n\n")
+        } else {
+            "Sorry, I received an empty response from the server."
+        }
+
+        _messages.add(ChatMessage(text = assistantMessage, author = Author.ASSISTANT))
     }
 
     private fun handleApiError(errorMessage: String) {
@@ -609,7 +621,6 @@ fun MessageInputArea(value: String, onValueChange: (String) -> Unit, onSendClick
                     }
                 }
             )
-
             val hasText = value.isNotBlank()
             val micAction = { /* TODO: Add voice input logic */ }
             val action = if(hasText) onSendClick else micAction
