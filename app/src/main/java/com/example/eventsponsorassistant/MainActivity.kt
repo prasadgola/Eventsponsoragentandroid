@@ -1,5 +1,8 @@
 package com.example.eventsponsorassistant
 
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -20,10 +23,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.DarkMode
-import androidx.compose.material.icons.filled.LightMode
-import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -32,10 +32,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
@@ -46,7 +46,6 @@ import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.Body
 import retrofit2.http.POST
-import retrofit2.http.PUT
 import retrofit2.http.Path
 import java.util.UUID
 
@@ -83,7 +82,6 @@ interface ApiService {
     ): Response<Any>
 }
 
-
 object RetrofitClient {
     private const val BASE_URL = "https://adk-backend-service-766291037876.us-central1.run.app/"
 
@@ -96,17 +94,17 @@ object RetrofitClient {
     }
 }
 
-
 // --- Data Classes to represent our chat messages ---
 enum class Author { USER, ASSISTANT }
 data class ChatMessage(
     val id: String = UUID.randomUUID().toString(),
     val text: String,
-    val author: Author
+    val author: Author,
+    val isOffline: Boolean = false // Track if message was sent offline
 )
 
 // --- ViewModel to hold our app's state and logic ---
-class ChatViewModel : ViewModel() {
+class ChatViewModel(private val context: Context) : ViewModel() {
     // --- STATE ---
     private val _messages = mutableStateListOf<ChatMessage>()
     val messages: List<ChatMessage> = _messages
@@ -123,6 +121,24 @@ class ChatViewModel : ViewModel() {
     var isDarkTheme by mutableStateOf(true)
         private set
 
+    var nanoAvailability by mutableStateOf<NanoAvailability>(NanoAvailability.NotSupported)
+        private set
+
+    var showOfflineIndicator by mutableStateOf(false)
+        private set
+
+    var downloadProgress by mutableStateOf(0f)
+        private set
+
+    private val geminiNanoManager = GeminiNanoManager(context)
+
+    init {
+        // Check Nano availability on init
+        viewModelScope.launch {
+            checkNanoAvailability()
+        }
+    }
+
     // --- INTENTS (User Actions) ---
     fun onTextInputChanged(newText: String) {
         textInput = newText
@@ -132,7 +148,6 @@ class ChatViewModel : ViewModel() {
         isDarkTheme = !isDarkTheme
     }
 
-    // NEW: Function to refresh the chat
     fun refreshChat() {
         _messages.clear()
         showWelcomeScreen = true
@@ -140,7 +155,54 @@ class ChatViewModel : ViewModel() {
         isLoading = false
     }
 
-    // --- UPDATED: sendMessage with session creation logic ---
+    private fun isOnline(): Boolean {
+        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE)
+                as ConnectivityManager
+        val network = connectivityManager.activeNetwork ?: return false
+        val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return false
+        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    }
+
+    suspend fun checkNanoAvailability() {
+        nanoAvailability = geminiNanoManager.checkAvailability()
+        updateOfflineIndicator()
+    }
+
+    private fun updateOfflineIndicator() {
+        val offline = !isOnline()
+        showOfflineIndicator = offline
+    }
+
+    fun downloadNanoModel() {
+        viewModelScope.launch {
+            nanoAvailability = NanoAvailability.Downloading
+            downloadProgress = 0f
+
+            val success = geminiNanoManager.downloadModel { progress ->
+                downloadProgress = progress
+            }
+
+            if (success) {
+                nanoAvailability = NanoAvailability.Available
+                _messages.add(
+                    ChatMessage(
+                        text = "✅ Offline AI model downloaded! You can now chat offline.",
+                        author = Author.ASSISTANT
+                    )
+                )
+            } else {
+                nanoAvailability = NanoAvailability.DownloadRequired
+                _messages.add(
+                    ChatMessage(
+                        text = "❌ Failed to download offline AI model. Please try again.",
+                        author = Author.ASSISTANT
+                    )
+                )
+            }
+            downloadProgress = 0f
+        }
+    }
+
     fun sendMessage(fromSuggestion: Boolean = false) {
         val messageText = textInput.trim()
         if (messageText.isEmpty() || isLoading) return
@@ -155,6 +217,53 @@ class ChatViewModel : ViewModel() {
             textInput = ""
         }
 
+        // Check if offline and Nano is available
+        val offline = !isOnline()
+        updateOfflineIndicator()
+
+        if (offline && nanoAvailability == NanoAvailability.Available) {
+            // Use Gemini Nano
+            sendNanoMessage(messageText)
+        } else if (offline) {
+            // Offline and Nano not available
+            _messages.add(
+                ChatMessage(
+                    text = "You are offline. Please connect to the internet or download the offline AI model.",
+                    author = Author.ASSISTANT
+                )
+            )
+        } else {
+            // Online - use backend
+            sendBackendMessage(messageText)
+        }
+    }
+
+    private fun sendNanoMessage(messageText: String) {
+        isLoading = true
+        viewModelScope.launch {
+            try {
+                val response = geminiNanoManager.generateResponse(messageText)
+                _messages.add(
+                    ChatMessage(
+                        text = response,
+                        author = Author.ASSISTANT,
+                        isOffline = true
+                    )
+                )
+            } catch (e: Exception) {
+                _messages.add(
+                    ChatMessage(
+                        text = "Sorry, I encountered an error: ${e.message}",
+                        author = Author.ASSISTANT
+                    )
+                )
+            } finally {
+                isLoading = false
+            }
+        }
+    }
+
+    private fun sendBackendMessage(messageText: String) {
         isLoading = true
         viewModelScope.launch {
             try {
@@ -162,15 +271,11 @@ class ChatViewModel : ViewModel() {
                     new_message = NewMessage(parts = listOf(MessagePart(text = messageText)))
                 )
 
-                // Try to run the agent
                 val response = RetrofitClient.instance.sendMessage(request)
 
                 if (response.isSuccessful) {
                     handleSuccessfulResponse(response.body())
                 } else if (response.code() == 404) {
-                    // Session not found - create it and retry
-                    println("🤔 Session not found (404). Creating a new session...")
-
                     val sessionCreated = createSession(
                         request.app_name,
                         request.user_id,
@@ -178,8 +283,6 @@ class ChatViewModel : ViewModel() {
                     )
 
                     if (sessionCreated) {
-                        println("🔄 Retrying to run the agent...")
-                        // Retry the original request
                         val retryResponse = RetrofitClient.instance.sendMessage(request)
 
                         if (retryResponse.isSuccessful) {
@@ -191,12 +294,10 @@ class ChatViewModel : ViewModel() {
                         handleApiError("Failed to create session. Please try again.")
                     }
                 } else {
-                    // Other errors
                     handleApiError("API Error: ${response.code()} - ${response.message()}")
                 }
 
             } catch (e: Exception) {
-                // Handle network-level errors
                 e.printStackTrace()
                 handleApiError("Network Error: Could not connect to the server. Please check your connection.")
             } finally {
@@ -205,14 +306,8 @@ class ChatViewModel : ViewModel() {
         }
     }
 
-    // --- NEW: Create session function ---
     private suspend fun createSession(appName: String, userId: String, sessionId: String): Boolean {
         return try {
-            println("🔧 Attempting to create session...")
-            println("   App Name: $appName")
-            println("   User ID: $userId")
-            println("   Session ID: $sessionId")
-
             val sessionState = SessionState(state = emptyMap())
             val response = RetrofitClient.instance.createSession(
                 appName = appName,
@@ -221,20 +316,8 @@ class ChatViewModel : ViewModel() {
                 sessionState = sessionState
             )
 
-            println("📡 Session creation response code: ${response.code()}")
-
-            if (response.isSuccessful) {
-                println("✅ Session created successfully")
-                true
-            } else {
-                val errorBody = response.errorBody()?.string()
-                println("❌ Failed to create session: ${response.code()} - ${response.message()}")
-                println("❌ Error body: $errorBody")
-                false
-            }
+            response.isSuccessful
         } catch (e: Exception) {
-            println("❌ Exception while creating session: ${e.message}")
-            println("❌ Exception type: ${e.javaClass.simpleName}")
             e.printStackTrace()
             false
         }
@@ -251,7 +334,6 @@ class ChatViewModel : ViewModel() {
             }
         }
 
-        // Join all text parts or show error if none found
         val assistantMessage = if (textParts.isNotEmpty()) {
             textParts.joinToString("\n\n")
         } else {
@@ -269,9 +351,14 @@ class ChatViewModel : ViewModel() {
         onTextInputChanged(suggestionText)
         sendMessage(fromSuggestion = true)
     }
+
+    override fun onCleared() {
+        super.onCleared()
+        geminiNanoManager.cleanup()
+    }
 }
 
-// --- App Theme Colors (matching your CSS) ---
+// --- App Theme Colors ---
 private val DarkColorScheme = darkColorScheme(
     primary = Color(0xFF8AB4F8),
     background = Color(0xFF212121),
@@ -297,7 +384,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            val viewModel = remember { ChatViewModel() }
+            val viewModel = remember { ChatViewModel(applicationContext) }
             val isDarkTheme = viewModel.isDarkTheme
 
             MaterialTheme(
@@ -318,16 +405,24 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun EventSponsorApp(viewModel: ChatViewModel) {
     Scaffold(
-        topBar = { AppHeader(
-            isDarkTheme = viewModel.isDarkTheme,
-            onThemeToggle = { viewModel.toggleTheme() },
-            onLogoClick = { viewModel.refreshChat() }
-        ) },
-        bottomBar = { MessageInputArea(
-            value = viewModel.textInput,
-            onValueChange = { viewModel.onTextInputChanged(it) },
-            onSendClick = { viewModel.sendMessage() }
-        ) }
+        topBar = {
+            AppHeader(
+                isDarkTheme = viewModel.isDarkTheme,
+                onThemeToggle = { viewModel.toggleTheme() },
+                onLogoClick = { viewModel.refreshChat() },
+                nanoAvailability = viewModel.nanoAvailability,
+                showOfflineIndicator = viewModel.showOfflineIndicator,
+                downloadProgress = viewModel.downloadProgress,
+                onDownloadClick = { viewModel.downloadNanoModel() }
+            )
+        },
+        bottomBar = {
+            MessageInputArea(
+                value = viewModel.textInput,
+                onValueChange = { viewModel.onTextInputChanged(it) },
+                onSendClick = { viewModel.sendMessage() }
+            )
+        }
     ) { paddingValues ->
         Box(
             modifier = Modifier
@@ -353,10 +448,21 @@ fun EventSponsorApp(viewModel: ChatViewModel) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AppHeader(isDarkTheme: Boolean, onThemeToggle: () -> Unit, onLogoClick: () -> Unit) {
+fun AppHeader(
+    isDarkTheme: Boolean,
+    onThemeToggle: () -> Unit,
+    onLogoClick: () -> Unit,
+    nanoAvailability: NanoAvailability,
+    showOfflineIndicator: Boolean,
+    downloadProgress: Float,
+    onDownloadClick: () -> Unit
+) {
     TopAppBar(
         title = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
                 Box(
                     modifier = Modifier
                         .size(32.dp)
@@ -365,10 +471,27 @@ fun AppHeader(isDarkTheme: Boolean, onThemeToggle: () -> Unit, onLogoClick: () -
                         .clickable(onClick = onLogoClick),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text("ES", color = MaterialTheme.colorScheme.background, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "ES",
+                        color = MaterialTheme.colorScheme.background,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
                 }
-                Spacer(Modifier.width(16.dp))
-                Text("Event Sponsor Assistant", fontSize = 20.sp, color = MaterialTheme.colorScheme.onBackground)
+                Text(
+                    "Event Sponsor",
+                    fontSize = 20.sp,
+                    color = MaterialTheme.colorScheme.onBackground
+                )
+
+                // Offline/Nano Status Indicator
+                if (showOfflineIndicator) {
+                    OfflineStatusBadge(
+                        nanoAvailability = nanoAvailability,
+                        downloadProgress = downloadProgress,
+                        onDownloadClick = onDownloadClick
+                    )
+                }
             }
         },
         actions = {
@@ -384,6 +507,90 @@ fun AppHeader(isDarkTheme: Boolean, onThemeToggle: () -> Unit, onLogoClick: () -
             containerColor = MaterialTheme.colorScheme.background,
         )
     )
+}
+
+@Composable
+fun OfflineStatusBadge(
+    nanoAvailability: NanoAvailability,
+    downloadProgress: Float,
+    onDownloadClick: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = when (nanoAvailability) {
+            is NanoAvailability.Available -> Color(0xFF34a853)
+            is NanoAvailability.Downloading -> MaterialTheme.colorScheme.primary
+            else -> MaterialTheme.colorScheme.surfaceVariant
+        },
+        modifier = Modifier.clickable(
+            enabled = nanoAvailability is NanoAvailability.DownloadRequired
+        ) {
+            if (nanoAvailability is NanoAvailability.DownloadRequired) {
+                onDownloadClick()
+            }
+        }
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            when (nanoAvailability) {
+                is NanoAvailability.Available -> {
+                    Icon(
+                        Icons.Default.CheckCircle,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                        tint = Color.White
+                    )
+                    Text(
+                        "Offline AI",
+                        fontSize = 12.sp,
+                        color = Color.White
+                    )
+                }
+                is NanoAvailability.Downloading -> {
+                    CircularProgressIndicator(
+                        progress = downloadProgress,
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = Color.White
+                    )
+                    Text(
+                        "${(downloadProgress * 100).toInt()}%",
+                        fontSize = 12.sp,
+                        color = Color.White
+                    )
+                }
+                is NanoAvailability.DownloadRequired -> {
+                    Icon(
+                        Icons.Default.Download,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        "Download AI",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                else -> {
+                    Icon(
+                        Icons.Default.CloudOff,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        "Offline",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -470,7 +677,6 @@ fun SuggestionCard(title: String, description: String, onClick: () -> Unit, modi
     }
 }
 
-
 @Composable
 fun ChatScreen(visible: Boolean, messages: List<ChatMessage>, isLoading: Boolean) {
     val listState = rememberLazyListState()
@@ -525,16 +731,39 @@ fun MessageBubble(message: ChatMessage) {
             Spacer(Modifier.width(8.dp))
         }
 
-        Surface(
-            color = bubbleColor,
-            shape = bubbleShape,
-            modifier = Modifier.widthIn(max = 300.dp)
-        ) {
-            Text(
-                text = message.text,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                color = MaterialTheme.colorScheme.onSurface
-            )
+        Column {
+            Surface(
+                color = bubbleColor,
+                shape = bubbleShape,
+                modifier = Modifier.widthIn(max = 300.dp)
+            ) {
+                Text(
+                    text = message.text,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+
+            // Show offline indicator for offline messages
+            if (message.isOffline) {
+                Row(
+                    modifier = Modifier.padding(top = 4.dp, start = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(
+                        Icons.Default.CloudOff,
+                        contentDescription = null,
+                        modifier = Modifier.size(12.dp),
+                        tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                    )
+                    Text(
+                        "Offline AI",
+                        fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                    )
+                }
+            }
         }
 
         if (isUser) {
@@ -643,25 +872,3 @@ fun MessageInputArea(value: String, onValueChange: (String) -> Unit, onSendClick
 }
 
 private val ColorScheme.isLight get() = this.background == LightColorScheme.background
-
-@Preview(showBackground = true, name = "Light Mode Preview")
-@Composable
-fun LightPreview() {
-    MaterialTheme(colorScheme = LightColorScheme) {
-        Surface(color = MaterialTheme.colorScheme.background) {
-            val previewViewModel = ChatViewModel()
-            EventSponsorApp(previewViewModel)
-        }
-    }
-}
-
-@Preview(showBackground = true, name = "Dark Mode Preview")
-@Composable
-fun DarkPreview() {
-    MaterialTheme(colorScheme = DarkColorScheme) {
-        Surface(color = MaterialTheme.colorScheme.background) {
-            val previewViewModel = ChatViewModel()
-            EventSponsorApp(previewViewModel)
-        }
-    }
-}

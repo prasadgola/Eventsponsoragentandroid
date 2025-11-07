@@ -16,6 +16,9 @@
         android:theme="@style/Theme.EventSponsorAssistant"
         android:usesCleartextTraffic="true"
         android:networkSecurityConfig="@xml/network_security_config">
+
+        <!-- Remove AI Edge Metadata -->
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

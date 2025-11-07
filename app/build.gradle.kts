@@ -15,12 +15,16 @@ android {
     namespace = "com.example.eventsponsorassistant"
     compileSdk = 36
 
+    androidResources {
+        ignoreAssetsPattern = "!.svn:!.git:.*:!CVS:!thumbs.db:!picasa.ini:!*.scc:*~"
+    }
+
     defaultConfig {
         applicationId = "com.basavaprasagola.events"
         minSdk = 24
         targetSdk = 36
-        versionCode = 10
-        versionName = "1.0"
+        versionCode = 13
+        versionName = "1.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
